@@ -242,7 +242,7 @@ static const DXGI_FORMAT k_msaaGroups[][7] = {
 /* Locate the family row containing Format, or NULL for a standalone format
  * (R11G11B10_FLOAT, A8_UNORM, packed/video) that has no typeless family and
  * thus no parent<->child constraint. */
-static const DXGI_FORMAT *tritonMsaaGroup(DXGI_FORMAT Format)
+const DXGI_FORMAT *tritonMsaaGroup(DXGI_FORMAT Format)
 {
     if (Format == DXGI_FORMAT_UNKNOWN)
         return NULL;
@@ -276,7 +276,7 @@ static BOOL tritonMsaaReadOnlyDepthView(DXGI_FORMAT Format)
  * raise the family value -- but a typeless parent still REPORTS and carries the
  * family value afterward, because the runtime treats it as a render-target-
  * capable member that must agree with its typed targets. */
-static BOOL tritonMsaaForbidden(DXGI_FORMAT Format)
+BOOL tritonMsaaForbidden(DXGI_FORMAT Format)
 {
     switch (Format) {
     case DXGI_FORMAT_R32G32B32A32_TYPELESS:

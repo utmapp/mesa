@@ -499,6 +499,11 @@ void tritonUpdateTirPixelShader(PTRITON_DEVICE pD);
 /* Fill r's present companion, if any (tritonResource.c). */
 void tritonResourceSyncPresentCompanion(PTRITON_DEVICE pD, PTRITON_RESOURCE r);
 
+/* A format's typeless family, parent first, or NULL; and whether a member
+ * is left out of the family's MSAA maximum (tritonQuery.c). */
+const DXGI_FORMAT *tritonMsaaGroup(DXGI_FORMAT Format);
+BOOL tritonMsaaForbidden(DXGI_FORMAT Format);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

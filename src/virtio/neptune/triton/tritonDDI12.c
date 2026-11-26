@@ -933,6 +933,31 @@ static const UINT8 s_msaa12Never[192] = {
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
 };
 
+static BOOL
+t12MsaaNever(DXGI_FORMAT Format)
+{
+    return (UINT)Format < 192u && s_msaa12Never[Format];
+}
+
+/* The host's own ladder for Format; *pFromHost goes FALSE when the query
+ * failed. */
+static UINT
+t12HostMsaaQuality(PTRITON12_DEVICE p, DXGI_FORMAT Format, UINT SampleCount,
+                   BOOL *pFromHost)
+{
+    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q;
+    q.Format = Format;
+    q.SampleCount = SampleCount;
+    q.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
+    q.NumQualityLevels = 0;
+    if (FAILED(ID3D12Device_CheckFeatureSupport(
+            p->pDev, D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &q, sizeof(q)))) {
+        *pFromHost = FALSE;
+        return 0;
+    }
+    return q.NumQualityLevels;
+}
+
 static UINT
 t12MsaaQuality(PTRITON12_DEVICE p, DXGI_FORMAT Format, UINT SampleCount)
 {
@@ -948,8 +973,7 @@ t12MsaaQuality(PTRITON12_DEVICE p, DXGI_FORMAT Format, UINT SampleCount)
      * member must match ("MSAA quality for parent != child" throws when a
      * gated root answers 0 while R32G32B32A32_FLOAT answers 1 -- seen the
      * moment the gate covered fmt 1).  Typeless parents of MSAA-capable
-     * families must therefore answer the FAMILY ladder (the host answers
-     * typeless queries family-consistently; depth-typeless lifts below).
+     * families must therefore answer the FAMILY ladder (below).
      * BC*_TYPELESS stay gated: their whole family is NEVER, so a zero
      * root and zero members stay consistent. */
     switch (Format) {
@@ -970,48 +994,44 @@ t12MsaaQuality(PTRITON12_DEVICE p, DXGI_FORMAT Format, UINT SampleCount)
     case DXGI_FORMAT_B8G8R8X8_TYPELESS:
         break;
     default:
-        if ((UINT)Format < 192u && s_msaa12Never[Format])
+        if (t12MsaaNever(Format))
             return SampleCount == 1 ? 1 : 0;
         break;
     }
 
-    UINT n = 0;
-    BOOL fromHost = FALSE;
-    D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS q;
-    q.Format = Format;
-    q.SampleCount = SampleCount;
-    q.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
-    q.NumQualityLevels = 0;
-    if (SUCCEEDED(ID3D12Device_CheckFeatureSupport(
-            p->pDev, D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &q, sizeof(q)))) {
-        n = q.NumQualityLevels;
-        fromHost = TRUE;
-    }
-
-    /* Typeless depth parents map to plain host formats with no depth
-     * MSAA, so take the typed depth member's answer instead. */
-    DXGI_FORMAT typedDepth = DXGI_FORMAT_UNKNOWN;
-    switch (Format) {
-    case DXGI_FORMAT_R32G8X24_TYPELESS: typedDepth = DXGI_FORMAT_D32_FLOAT_S8X24_UINT; break;
-    case DXGI_FORMAT_R32_TYPELESS:      typedDepth = DXGI_FORMAT_D32_FLOAT;            break;
-    case DXGI_FORMAT_R24G8_TYPELESS:    typedDepth = DXGI_FORMAT_D24_UNORM_S8_UINT;    break;
-    case DXGI_FORMAT_R16_TYPELESS:      typedDepth = DXGI_FORMAT_D16_UNORM;            break;
-    default: break;
-    }
-    if (typedDepth != DXGI_FORMAT_UNKNOWN) {
-        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS qd;
-        qd.Format = typedDepth;
-        qd.SampleCount = SampleCount;
-        qd.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
-        qd.NumQualityLevels = 0;
-        if (SUCCEEDED(ID3D12Device_CheckFeatureSupport(
-                p->pDev, D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &qd,
-                sizeof(qd))) && qd.NumQualityLevels > n)
-            n = qd.NumQualityLevels;
-    }
-
     /* A failed round trip (DEVICE_REMOVED, host rejection) is not a
      * host answer; a zero cached from it would outlive the failure. */
+    BOOL fromHost = TRUE;
+
+    /* The same walk throws, also without a journal string, when two
+     * members of a cast set that are not NEVER disagree on
+     * MULTISAMPLE_RENDERTARGET.  The host answers each format alone, and
+     * DXMT, for one, reports MSAA on R32G32B32A32_FLOAT but not on
+     * R32G32B32A32_UINT.  As for D3D11 (tritonMsaaQuality), the parent and
+     * every member the gate passes answer the family maximum, which also
+     * covers typeless depth parents that map to host formats without
+     * depth MSAA. */
+    const DXGI_FORMAT *group =
+        SampleCount > 1 ? tritonMsaaGroup(Format) : NULL;
+    if (group) {
+        UINT famMax = 0;
+        for (unsigned j = 0; j < 7 && group[j] != DXGI_FORMAT_UNKNOWN; j++) {
+            if (tritonMsaaForbidden(group[j]) || t12MsaaNever(group[j]))
+                continue;
+            UINT m = t12HostMsaaQuality(p, group[j], SampleCount, &fromHost);
+            if (m > famMax)
+                famMax = m;
+        }
+        for (unsigned j = 0; fromHost && j < 7 &&
+                             group[j] != DXGI_FORMAT_UNKNOWN; j++)
+            if ((j == 0 || !t12MsaaNever(group[j])) &&
+                (UINT)group[j] < 256u && SampleCount <= 32u)
+                InterlockedExchange64(&s_msaa12Cache[group[j]][SampleCount],
+                                      T12_QCACHE_VALID | (LONG64)famMax);
+        return famMax;
+    }
+
+    UINT n = t12HostMsaaQuality(p, Format, SampleCount, &fromHost);
     if (fromHost && (UINT)Format < 256u && SampleCount <= 32u)
         InterlockedExchange64(&s_msaa12Cache[Format][SampleCount],
                               T12_QCACHE_VALID | (LONG64)n);
